@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 from typing import Optional
 import os
+import sqlite3
 from dotenv import load_dotenv
 
 # Load env before importing AI modules
@@ -18,34 +19,110 @@ app = FastAPI(title="Velora AI Backend", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173",
-                   "http://localhost:5174", "http://127.0.0.1:5174"],
+                   "http://localhost:5174", "http://127.0.0.1:5174",
+                   "http://localhost", "http://127.0.0.1",
+                   "http://192.168.137.29:5173", "http://192.168.137.29:5174"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ── Load dataset ───────────────────────────────────────────────────────────────
-DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "argo_sample.csv")
-df = pd.read_csv(DATA_PATH)
-df["date"] = pd.to_datetime(df["date"])
-df["year"] = df["date"].dt.year
+# ── Database connection ──────────────────────────────────────────────────────────
+DB_PATH = os.path.join(os.path.dirname(__file__), "data", "argo.db")
+RAW_PREVIEW_LIMIT = 100
+
+def get_db_connection():
+    """Get SQLite connection with row factory for dict-like access"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA temp_store = MEMORY")
+    conn.execute("PRAGMA cache_size = -64000")
+    return conn
 
 predictor = OceanPredictor()
 
+# Region geographic bounds (lon_min, lon_max, lat_min, lat_max)
+REGION_BOUNDS = {
+    "Indian Ocean": (20, 120, -60, 23),
+    "Pacific Ocean": (120, 180, -60, 60),
+    "Atlantic Ocean": (-100, 0, -60, 60),
+    "Arctic Ocean": (-180, 180, 60, 90),
+}
+
+def clean_nans(obj):
+    """Recursively replace NaN/Inf values with None or 0"""
+    if isinstance(obj, dict):
+        return {k: clean_nans(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [clean_nans(v) for v in obj]
+    elif isinstance(obj, float):
+        if np.isnan(obj) or np.isinf(obj):
+            return 0.0 if np.isnan(obj) else None
+        return obj
+    return obj
 
 # ── Shared filter + response builder ──────────────────────────────────────────
 def build_response(region: str, parameter: str, start_year, end_year,
                    question: str = "", parsed_source: str = "rule-based"):
 
+    # Ensure parameter is valid
     col = parameter if parameter in ["temperature", "salinity"] else "temperature"
-    filtered = df[df["region"] == region].copy()
-
+    
+    # Check region validity
+    if region not in REGION_BOUNDS:
+        return {
+            "region": region, "parameter": col, "question": question,
+            "parsed": {"region": region, "parameter": col,
+                       "start_year": start_year, "end_year": end_year,
+                       "source": parsed_source},
+            "data": [], "stats": {}, "trend": None, "prediction": [],
+            "insight": None,
+            "message": f"Region not recognized: {region}",
+        }
+    
+    # Query database
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    # Build SQL query with filters
+    where_clauses = []
+    params = []
+    
+    # Add region filter (geographic bounds)
+    lon_min, lon_max, lat_min, lat_max = REGION_BOUNDS[region]
+    where_clauses.append("longitude >= ? AND longitude <= ? AND latitude >= ? AND latitude <= ?")
+    params.extend([lon_min, lon_max, lat_min, lat_max])
+    
+    # Add year filters
     if start_year:
-        filtered = filtered[filtered["year"] >= start_year]
+        where_clauses.append("substr(time, 1, 4) >= ?")
+        params.append(str(start_year))
     if end_year:
-        filtered = filtered[filtered["year"] <= end_year]
+        where_clauses.append("substr(time, 1, 4) <= ?")
+        params.append(str(end_year))
+    
+    # Build the WHERE clause
+    where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+    
+    # Get column name to query
+    col_name = "temperature" if col == "temperature" else "salinity"
+    
+    stats_query = f"""
+        SELECT
+            COUNT({col_name}) AS count,
+            MIN({col_name}) AS min_val,
+            MAX({col_name}) AS max_val,
+            AVG({col_name}) AS mean_val,
+            (AVG({col_name} * {col_name}) - AVG({col_name}) * AVG({col_name})) AS variance
+        FROM argo_data
+        WHERE {where_sql} AND {col_name} IS NOT NULL
+    """
+    cur.execute(stats_query, params)
+    stats_row = cur.fetchone()
 
-    if filtered.empty:
+    total_count = int(stats_row["count"] or 0)
+    if total_count == 0:
+        conn.close()
         return {
             "region": region, "parameter": col, "question": question,
             "parsed": {"region": region, "parameter": col,
@@ -56,34 +133,66 @@ def build_response(region: str, parameter: str, start_year, end_year,
             "message": f"No data found for region: {region}",
         }
 
-    # Records
+    preview_query = f"""
+        SELECT time, latitude, longitude, temperature, salinity
+        FROM argo_data
+        WHERE {where_sql}
+        ORDER BY time DESC
+        LIMIT {RAW_PREVIEW_LIMIT}
+    """
+    cur.execute(preview_query, params)
+    preview_rows = cur.fetchall()
+
     records = [
         {
-            "date": row["date"].strftime("%Y-%m-%d"),
-            "year": int(row["year"]),
+            "date": row["time"],
+            "year": int(str(row["time"])[:4]) if row["time"] else None,
             "latitude": float(row["latitude"]),
             "longitude": float(row["longitude"]),
-            "temperature": float(row["temperature"]),
-            "salinity": float(row["salinity"]),
+            "temperature": float(row["temperature"]) if pd.notna(row["temperature"]) else None,
+            "salinity": float(row["salinity"]) if pd.notna(row["salinity"]) else None,
         }
-        for _, row in filtered.iterrows()
+        for row in preview_rows
     ]
 
-    # Stats
-    values = filtered[col].values
+    mean_val = float(stats_row["mean_val"]) if stats_row["mean_val"] is not None else 0.0
+    variance = float(stats_row["variance"]) if stats_row["variance"] is not None else 0.0
+    std_val = float(np.sqrt(max(variance, 0.0)))
+
     stats = {
-        "min":   round(float(np.min(values)),  2),
-        "max":   round(float(np.max(values)),  2),
-        "mean":  round(float(np.mean(values)), 2),
-        "std":   round(float(np.std(values)),  2),
-        "count": len(values),
+        "min": round(float(stats_row["min_val"]) if stats_row["min_val"] is not None else 0.0, 2),
+        "max": round(float(stats_row["max_val"]) if stats_row["max_val"] is not None else 0.0, 2),
+        "mean": round(mean_val, 2),
+        "std": round(std_val, 2),
+        "count": total_count,
     }
 
-    # Trend
-    years_arr = filtered["year"].values
+    yearly_query = f"""
+        SELECT CAST(substr(time, 1, 4) AS INTEGER) AS year, AVG({col_name}) AS avg_value
+        FROM argo_data
+        WHERE {where_sql} AND {col_name} IS NOT NULL
+        GROUP BY CAST(substr(time, 1, 4) AS INTEGER)
+        ORDER BY year ASC
+    """
+    cur.execute(yearly_query, params)
+    yearly_rows = cur.fetchall()
+
+    years_arr = np.array([int(row["year"]) for row in yearly_rows], dtype=float)
+    yearly_values = np.array([float(row["avg_value"]) for row in yearly_rows], dtype=float)
+
+    yearly_data = [
+        {"year": int(year), "value": round(float(value), 2)}
+        for year, value in zip(years_arr, yearly_values)
+    ]
+
     if len(years_arr) > 1:
-        coeffs = np.polyfit(years_arr, values, 1)
-        trend_per_year = round(float(coeffs[0]), 4)
+        try:
+            coeffs = np.polyfit(years_arr, yearly_values, 1)
+            trend_per_year = round(float(coeffs[0]), 4)
+            if np.isnan(trend_per_year):
+                trend_per_year = 0.0
+        except:
+            trend_per_year = 0.0
     else:
         trend_per_year = 0.0
 
@@ -93,30 +202,40 @@ def build_response(region: str, parameter: str, start_year, end_year,
     }
 
     # Prediction (5 years ahead)
-    pred_result = predictor.predict_trend(filtered, col, future_years=5)
+    prediction_df = pd.DataFrame({
+        "year": years_arr.astype(int),
+        col_name: yearly_values,
+    })
+    pred_result = predictor.predict_trend(prediction_df, col_name, future_years=5)
     prediction_points = pred_result.get("predictions", []) if pred_result.get("success") else []
 
     # AI Insight
-    insight = generate_insight(region, col, stats, trend)
+    insight = generate_insight(region, col_name, stats, trend)
+    
+    conn.close()
 
-    return {
+    response = {
         "region":    region,
         "parameter": col,
         "question":  question,
         "parsed": {
             "region": region, "parameter": col,
-            "start_year": start_year or int(filtered["year"].min()),
-            "end_year":   end_year   or int(filtered["year"].max()),
+            "start_year": start_year or int(years_arr.min()),
+            "end_year":   end_year   or int(years_arr.max()),
             "source": parsed_source,
         },
-        "start_year": int(filtered["year"].min()),
-        "end_year":   int(filtered["year"].max()),
+        "start_year": int(years_arr.min()),
+        "end_year":   int(years_arr.max()),
+        "raw_limit":  RAW_PREVIEW_LIMIT,
         "data":       records,
+        "yearly_data": yearly_data,
         "stats":      stats,
         "trend":      trend,
         "prediction": prediction_points,   # [{year, value}, ...]
         "insight":    insight,             # {text, source}
     }
+    
+    return clean_nans(response)
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -128,17 +247,23 @@ def home():
         "message": "Velora AI backend running",
         "version": "2.0.0",
         "llm": "groq/llama3-70b-8192" if groq_enabled else "rule-based",
+        "data": "ARGO Real Dataset (25M+ records)",
     }
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "records": len(df)}
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM argo_data")
+    count = cur.fetchone()[0]
+    conn.close()
+    return {"status": "healthy", "records": count}
 
 
 @app.get("/regions")
 def regions():
-    return {"regions": sorted(df["region"].unique().tolist())}
+    return {"regions": list(REGION_BOUNDS.keys())}
 
 
 @app.post("/query")

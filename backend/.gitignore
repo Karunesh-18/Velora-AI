@@ -46,3 +46,8 @@ htmlcov/
 
 # Node (if any tools use it in backend)
 node_modules/
+
+# Local large data artifacts
+data/*.db
+data/*.db-*
+data/ArgoFloats_*.csv

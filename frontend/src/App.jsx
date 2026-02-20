@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import axios from "axios";
 import {
   ComposedChart,
@@ -14,7 +14,11 @@ import {
 } from "recharts";
 import "./App.css";
 
-const API_URL = "http://127.0.0.1:8001";
+const API_URL =
+  import.meta.env.VITE_API_URL ||
+  (window.location.hostname === "localhost"
+    ? "http://127.0.0.1:8000"
+    : `http://${window.location.hostname}:8000`);
 
 const EXAMPLE_QUERIES = [
   "Show temperature trend in Indian Ocean from 2015 to 2020",
@@ -51,6 +55,7 @@ export default function App() {
   const [result, setResult]         = useState(null);
   const [loading, setLoading]       = useState(false);
   const chatEndRef                  = useRef(null);
+  const queryCache                  = useRef({}); // Cache for query results
 
   // Health check
   useEffect(() => {
@@ -72,6 +77,24 @@ export default function App() {
     setResult(null);
 
     try {
+      // Check cache first
+      if (queryCache.current[question]) {
+        setResult(queryCache.current[question]);
+        const data = queryCache.current[question];
+        const trendDir = data.trend?.direction;
+        const trendIcon = trendDir === "rising" ? "↑" : trendDir === "falling" ? "↓" : "→";
+        const unit = data.parameter === "temperature" ? "°C" : " PSU";
+        const insightSrc = data.insight?.source === "llm" ? "🤖 LLaMA-3" : "📋 Template";
+        const aiText =
+          `Analysed **${data.region}** (${data.start_year}–${data.end_year}) — ` +
+          `${data.parameter} · Mean: **${data.stats.mean}${unit}** · ` +
+          `Trend: **${trendIcon} ${Math.abs(data.trend?.per_year)}${unit}/yr ${data.trend?.direction}** · ` +
+          `Insight via ${insightSrc} (cached)`;
+        setMessages((prev) => [...prev, { role: "ai", text: aiText }]);
+        setLoading(false);
+        return;
+      }
+
       const res = await axios.post(`${API_URL}/query`, { question });
       const data = res.data;
 
@@ -81,6 +104,8 @@ export default function App() {
           { role: "ai", text: data.message || data.error, isError: true },
         ]);
       } else {
+        // Cache the result
+        queryCache.current[question] = data;
         setResult(data);
         const trendDir = data.trend?.direction;
         const trendIcon = trendDir === "rising" ? "↑" : trendDir === "falling" ? "↓" : "→";
@@ -105,17 +130,20 @@ export default function App() {
 
   // Merge historical + prediction into one chart array
   const chartData = useMemo(() => {
-    if (!result?.data?.length) return [];
-    const hist = result.data.map((r) => ({
-      year: r.year,
-      [result.parameter]: r[result.parameter],
+    if (!result?.yearly_data?.length) return [];
+
+    const hist = result.yearly_data.map((point) => ({
+      year: point.year,
+      [result.parameter]: point.value,
       predicted: null,
     }));
+
     const predPoints = (result.prediction || []).map((p) => ({
       year: p.year,
       [result.parameter]: null,
       predicted: parseFloat(p.value.toFixed(2)),
     }));
+    
     return [...hist, ...predPoints];
   }, [result]);
 
@@ -303,7 +331,7 @@ export default function App() {
                     {result.parameter === "temperature" ? "Temperature (°C)" : "Salinity (PSU)"}
                   </div>
                   <div className="chart-subtitle">
-                    {result.start_year}–{result.end_year} · {result.stats.count} data points
+                    {result.start_year}–{result.end_year} · {result.stats.count.toLocaleString()} measurements
                     {result.prediction?.length > 0 && (
                       <span style={{ color: "#a78bfa", marginLeft: 8 }}>
                         + {result.prediction.length}yr forecast
@@ -314,7 +342,7 @@ export default function App() {
                 <div className="chart-badge">ARGO Floats</div>
               </div>
 
-              <div className="chart-wrapper">
+              <div className="chart-wrapper" style={{ width: '100%', height: '320px', minHeight: '320px', display: 'flex' }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <ComposedChart data={chartData} margin={{ top: 6, right: 6, left: -12, bottom: 0 }}>
                     <defs>
@@ -392,7 +420,7 @@ export default function App() {
             <div className="glass table-card" style={{ animation: "fadeInUp 0.5s ease" }}>
               <div className="table-header">
                 <div className="table-title">📋 Raw Data Records</div>
-                <span className="record-count">{result.data.length} records</span>
+                <span className="record-count">showing {result.data.length} / {result.stats.count} records</span>
               </div>
               <div style={{ overflowX: "auto" }}>
                 <table className="data-table">
@@ -409,10 +437,10 @@ export default function App() {
                     {result.data.map((row, i) => (
                       <tr key={i}>
                         <td>{row.date}</td>
-                        <td>{row.latitude.toFixed(2)}</td>
-                        <td>{row.longitude.toFixed(2)}</td>
-                        <td className="temp-cell">{row.temperature.toFixed(2)}</td>
-                        <td className="sal-cell">{row.salinity.toFixed(2)}</td>
+                        <td>{row.latitude != null ? row.latitude.toFixed(2) : "—"}</td>
+                        <td>{row.longitude != null ? row.longitude.toFixed(2) : "—"}</td>
+                        <td className="temp-cell">{row.temperature != null ? row.temperature.toFixed(2) : "—"}</td>
+                        <td className="sal-cell">{row.salinity != null ? row.salinity.toFixed(2) : "—"}</td>
                       </tr>
                     ))}
                   </tbody>

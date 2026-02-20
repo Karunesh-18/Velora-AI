@@ -43,7 +43,8 @@ def _rule_based(question: str) -> Dict:
     parameter = "salinity" if "salin" in q else "temperature"
 
     years = [int(y) for y in re.findall(r"\b(20\d{2})\b", q)]
-    start_year = min(years) if len(years) >= 2 else (years[0] if years else None)
+    years = sorted(list(set(years)))  # Remove duplicates and sort
+    start_year = min(years) if years else None
     end_year   = max(years) if len(years) >= 2 else None
 
     return {"region": region, "parameter": parameter,
