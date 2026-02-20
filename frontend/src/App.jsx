@@ -20,12 +20,21 @@ const API_URL =
     ? "http://127.0.0.1:8000"
     : `http://${window.location.hostname}:8000`);
 
-const EXAMPLE_QUERIES = [
-  "Show temperature trend in Indian Ocean from 2015 to 2020",
-  "What is the salinity in Pacific Ocean?",
-  "Atlantic Ocean temperature from 2018 to 2022",
-  "How warm is the Arctic Ocean?",
-];
+const DATASET_YEAR_START = 2020;
+const DATASET_YEAR_END = 2026;
+
+const buildExampleQueries = (startYear, endYear) => {
+  const safeStart = Number.isInteger(startYear) ? startYear : 2018;
+  const safeEnd = Number.isInteger(endYear) ? endYear : 2022;
+  const midYear = Math.floor((safeStart + safeEnd) / 2);
+
+  return [
+    `Show temperature trend in Indian Ocean from ${safeStart} to ${safeEnd}`,
+    `What is the salinity in Pacific Ocean from ${safeStart} to ${safeEnd}?`,
+    `Atlantic Ocean temperature in ${midYear}`,
+    `How warm is the Arctic Ocean in ${safeEnd}?`,
+  ];
+};
 
 const REGION_EMOJIS = {
   "Indian Ocean":   "🌊",
@@ -56,6 +65,13 @@ export default function App() {
   const [loading, setLoading]       = useState(false);
   const chatEndRef                  = useRef(null);
   const queryCache                  = useRef({}); // Cache for query results
+
+  const exampleQueries = useMemo(() => buildExampleQueries(DATASET_YEAR_START, DATASET_YEAR_END), []);
+
+  const inputPlaceholder = useMemo(
+    () => `e.g. Show temperature in Indian Ocean from ${DATASET_YEAR_START}–${DATASET_YEAR_END}`,
+    []
+  );
 
   // Health check
   useEffect(() => {
@@ -154,6 +170,8 @@ export default function App() {
 
   const trendDir  = result?.trend?.direction;
   const trendIcon = trendDir === "rising" ? "↑" : trendDir === "falling" ? "↓" : "→";
+  const risk = result?.risk;
+  const riskClass = risk?.level_key ? `risk-${risk.level_key}` : "risk-low";
 
   return (
     <div className="app">
@@ -189,7 +207,7 @@ export default function App() {
                   <div className="chat-welcome-title">Ask me about ocean data</div>
 
                   <div className="example-list">
-                    {EXAMPLE_QUERIES.map((q, i) => (
+                    {exampleQueries.map((q, i) => (
                       <button
                         key={i}
                         className="example-chip"
@@ -232,7 +250,7 @@ export default function App() {
               <input
                 type="text"
                 className="chat-input"
-                placeholder="e.g. Show temperature in Indian Ocean from 2018–2022"
+                placeholder={inputPlaceholder}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 disabled={loading}
@@ -317,6 +335,30 @@ export default function App() {
                   </div>
                 </div>
               )}
+            </div>
+          )}
+
+          {risk && (
+            <div className={`glass risk-card ${riskClass}`} style={{ animation: "fadeInUp 0.38s ease" }}>
+              <div className="risk-header">
+                <div className="risk-title">🌡 Marine Risk Index</div>
+                <div className={`risk-level ${riskClass}`}>{risk.level}</div>
+              </div>
+              <div className="risk-score">
+                <span className="risk-score-value">{risk.score}</span>
+                <span className="risk-score-label">/ 7</span>
+              </div>
+              <div className="risk-factors">
+                <span className={`risk-factor ${risk.factors?.temperature_anomaly ? "active" : ""}`}>
+                  Temp anomaly +2
+                </span>
+                <span className={`risk-factor ${risk.factors?.rapid_warming ? "active" : ""}`}>
+                  Rapid warming +3
+                </span>
+                <span className={`risk-factor ${risk.factors?.salinity_imbalance ? "active" : ""}`}>
+                  Salinity imbalance +2
+                </span>
+              </div>
             </div>
           )}
 

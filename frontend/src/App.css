@@ -540,6 +540,95 @@
 .trend-badge.falling { background: rgba(79, 209, 197, 0.1); border: 1px solid rgba(79,209,197,0.3); color: var(--cyan); }
 .trend-badge.stable  { background: rgba(255, 200, 50, 0.1); border: 1px solid rgba(255,200,50,0.3); color: #ffc832; }
 
+/* ===== RISK INDEX ===== */
+.risk-card {
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.risk-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.risk-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.risk-level {
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  border: 1px solid transparent;
+}
+
+.risk-level.risk-low {
+  background: rgba(79, 209, 197, 0.12);
+  border-color: rgba(79, 209, 197, 0.35);
+  color: var(--cyan);
+}
+
+.risk-level.risk-moderate {
+  background: rgba(255, 200, 50, 0.12);
+  border-color: rgba(255, 200, 50, 0.4);
+  color: #ffc832;
+}
+
+.risk-level.risk-high {
+  background: rgba(255, 117, 117, 0.12);
+  border-color: rgba(255, 117, 117, 0.4);
+  color: #ff7575;
+}
+
+.risk-score {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.risk-score-value {
+  font-size: 1.6rem;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+
+.risk-score-label {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.risk-factors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.risk-factor {
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.risk-factor.active {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+  background: rgba(255, 255, 255, 0.06);
+}
+
 /* ===== DASHBOARD AREA ===== */
 .dashboard {
   flex: 1;

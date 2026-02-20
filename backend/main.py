@@ -106,21 +106,53 @@ def build_response(region: str, parameter: str, start_year, end_year,
     
     # Get column name to query
     col_name = "temperature" if col == "temperature" else "salinity"
-    
-    stats_query = f"""
-        SELECT
-            COUNT({col_name}) AS count,
-            MIN({col_name}) AS min_val,
-            MAX({col_name}) AS max_val,
-            AVG({col_name}) AS mean_val,
-            (AVG({col_name} * {col_name}) - AVG({col_name}) * AVG({col_name})) AS variance
-        FROM argo_data
-        WHERE {where_sql} AND {col_name} IS NOT NULL
-    """
-    cur.execute(stats_query, params)
-    stats_row = cur.fetchone()
 
-    total_count = int(stats_row["count"] or 0)
+    def calc_stats(target_col):
+        stats_query = f"""
+            SELECT
+                COUNT({target_col}) AS count,
+                MIN({target_col}) AS min_val,
+                MAX({target_col}) AS max_val,
+                AVG({target_col}) AS mean_val,
+                (AVG({target_col} * {target_col}) - AVG({target_col}) * AVG({target_col})) AS variance
+            FROM argo_data
+            WHERE {where_sql} AND {target_col} IS NOT NULL
+        """
+        cur.execute(stats_query, params)
+        row = cur.fetchone()
+
+        count = int(row["count"] or 0)
+        min_val = float(row["min_val"]) if row["min_val"] is not None else 0.0
+        max_val = float(row["max_val"]) if row["max_val"] is not None else 0.0
+        mean_val = float(row["mean_val"]) if row["mean_val"] is not None else 0.0
+        variance = float(row["variance"]) if row["variance"] is not None else 0.0
+        std_val = float(np.sqrt(max(variance, 0.0)))
+
+        return {
+            "count": count,
+            "min": min_val,
+            "max": max_val,
+            "mean": mean_val,
+            "std": std_val,
+        }
+
+    def calc_yearly_avg(target_col):
+        yearly_query = f"""
+            SELECT CAST(substr(time, 1, 4) AS INTEGER) AS year, AVG({target_col}) AS avg_value
+            FROM argo_data
+            WHERE {where_sql} AND {target_col} IS NOT NULL
+            GROUP BY CAST(substr(time, 1, 4) AS INTEGER)
+            ORDER BY year ASC
+        """
+        cur.execute(yearly_query, params)
+        rows = cur.fetchall()
+
+        years = np.array([int(row["year"]) for row in rows], dtype=float)
+        values = np.array([float(row["avg_value"]) for row in rows], dtype=float)
+        return years, values
+
+    stats_raw = calc_stats(col_name)
+    total_count = stats_raw["count"]
     if total_count == 0:
         conn.close()
         return {
@@ -155,31 +187,15 @@ def build_response(region: str, parameter: str, start_year, end_year,
         for row in preview_rows
     ]
 
-    mean_val = float(stats_row["mean_val"]) if stats_row["mean_val"] is not None else 0.0
-    variance = float(stats_row["variance"]) if stats_row["variance"] is not None else 0.0
-    std_val = float(np.sqrt(max(variance, 0.0)))
-
     stats = {
-        "min": round(float(stats_row["min_val"]) if stats_row["min_val"] is not None else 0.0, 2),
-        "max": round(float(stats_row["max_val"]) if stats_row["max_val"] is not None else 0.0, 2),
-        "mean": round(mean_val, 2),
-        "std": round(std_val, 2),
+        "min": round(stats_raw["min"], 2),
+        "max": round(stats_raw["max"], 2),
+        "mean": round(stats_raw["mean"], 2),
+        "std": round(stats_raw["std"], 2),
         "count": total_count,
     }
 
-    yearly_query = f"""
-        SELECT CAST(substr(time, 1, 4) AS INTEGER) AS year, AVG({col_name}) AS avg_value
-        FROM argo_data
-        WHERE {where_sql} AND {col_name} IS NOT NULL
-        GROUP BY CAST(substr(time, 1, 4) AS INTEGER)
-        ORDER BY year ASC
-    """
-    cur.execute(yearly_query, params)
-    yearly_rows = cur.fetchall()
-
-    years_arr = np.array([int(row["year"]) for row in yearly_rows], dtype=float)
-    yearly_values = np.array([float(row["avg_value"]) for row in yearly_rows], dtype=float)
-
+    years_arr, yearly_values = calc_yearly_avg(col_name)
     yearly_data = [
         {"year": int(year), "value": round(float(value), 2)}
         for year, value in zip(years_arr, yearly_values)
@@ -199,6 +215,63 @@ def build_response(region: str, parameter: str, start_year, end_year,
     trend = {
         "per_year":  trend_per_year,
         "direction": "rising" if trend_per_year > 0 else "falling" if trend_per_year < 0 else "stable",
+    }
+
+    temp_stats_raw = stats_raw if col_name == "temperature" else calc_stats("temperature")
+    sal_stats_raw = stats_raw if col_name == "salinity" else calc_stats("salinity")
+    temp_years, temp_values = (years_arr, yearly_values) if col_name == "temperature" else calc_yearly_avg("temperature")
+
+    temp_trend_per_year = 0.0
+    if len(temp_years) > 1:
+        try:
+            temp_coeffs = np.polyfit(temp_years, temp_values, 1)
+            temp_trend_per_year = round(float(temp_coeffs[0]), 4)
+            if np.isnan(temp_trend_per_year):
+                temp_trend_per_year = 0.0
+        except:
+            temp_trend_per_year = 0.0
+
+    def is_anomalous(stats_blob, low_thresh=0.15, high_thresh=0.85):
+        if stats_blob["count"] <= 0:
+            return False
+        value_range = stats_blob["max"] - stats_blob["min"]
+        if value_range <= 0:
+            return False
+        normalized = (stats_blob["mean"] - stats_blob["min"]) / value_range
+        return normalized <= low_thresh or normalized >= high_thresh
+
+    temp_anomaly = is_anomalous(temp_stats_raw)
+    salinity_imbalance = is_anomalous(sal_stats_raw)
+    rapid_warming = abs(temp_trend_per_year) >= 0.05
+
+    risk_score = 0
+    if temp_anomaly:
+        risk_score += 2
+    if rapid_warming:
+        risk_score += 3
+    if salinity_imbalance:
+        risk_score += 2
+
+    if risk_score >= 5:
+        risk_level = "High Marine Stress"
+        risk_level_key = "high"
+    elif risk_score >= 3:
+        risk_level = "Moderate Risk"
+        risk_level_key = "moderate"
+    else:
+        risk_level = "Low Risk"
+        risk_level_key = "low"
+
+    risk = {
+        "score": risk_score,
+        "level": risk_level,
+        "level_key": risk_level_key,
+        "factors": {
+            "temperature_anomaly": temp_anomaly,
+            "rapid_warming": rapid_warming,
+            "salinity_imbalance": salinity_imbalance,
+        },
+        "temp_trend_per_year": temp_trend_per_year,
     }
 
     # Prediction (5 years ahead)
@@ -233,6 +306,7 @@ def build_response(region: str, parameter: str, start_year, end_year,
         "trend":      trend,
         "prediction": prediction_points,   # [{year, value}, ...]
         "insight":    insight,             # {text, source}
+        "risk":       risk,
     }
     
     return clean_nans(response)
@@ -264,6 +338,27 @@ def health():
 @app.get("/regions")
 def regions():
     return {"regions": list(REGION_BOUNDS.keys())}
+
+
+@app.get("/year-range")
+def year_range():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            MIN(CAST(substr(time, 1, 4) AS INTEGER)) AS start_year,
+            MAX(CAST(substr(time, 1, 4) AS INTEGER)) AS end_year
+        FROM argo_data
+        WHERE time IS NOT NULL
+        """
+    )
+    row = cur.fetchone()
+    conn.close()
+
+    start_year = int(row["start_year"]) if row and row["start_year"] is not None else None
+    end_year = int(row["end_year"]) if row and row["end_year"] is not None else None
+    return {"start_year": start_year, "end_year": end_year}
 
 
 @app.post("/query")
