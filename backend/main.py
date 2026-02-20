@@ -11,17 +11,30 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from ai.query_parser import parse_query
-from ai.insight_generator import generate_insight
+from ai.insight_generator import generate_insight, generate_answer
 from ai.predictor import OceanPredictor
 
 app = FastAPI(title="Velora AI Backend", version="2.0.0")
 
+default_cors = [
+    "http://localhost:5173", "http://127.0.0.1:5173",
+    "http://localhost:5174", "http://127.0.0.1:5174",
+    "http://localhost", "http://127.0.0.1",
+    "capacitor://localhost",
+    "http://localhost:8100",
+    "http://192.168.137.29:5173", "http://192.168.137.29:5174",
+    "http://10.82.81.103:5173", "http://10.82.81.103:5174",
+]
+
+cors_env = os.getenv("CORS_ORIGINS", "")
+if cors_env.strip():
+    allow_origins = [origin.strip() for origin in cors_env.split(",") if origin.strip()]
+else:
+    allow_origins = default_cors
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173",
-                   "http://localhost:5174", "http://127.0.0.1:5174",
-                   "http://localhost", "http://127.0.0.1",
-                   "http://192.168.137.29:5173", "http://192.168.137.29:5174"],
+    allow_origins=allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -274,6 +287,83 @@ def build_response(region: str, parameter: str, start_year, end_year,
         "temp_trend_per_year": temp_trend_per_year,
     }
 
+    range_start = int(years_arr.min()) if len(years_arr) > 0 else start_year
+    range_end = int(years_arr.max()) if len(years_arr) > 0 else end_year
+    span_years = (range_end - range_start) if range_start and range_end else 0
+
+    if span_years <= 1:
+        granularity = "month"
+    elif span_years <= 5:
+        granularity = "quarter"
+    else:
+        granularity = "year"
+
+    if granularity == "month":
+        timeseries_query = f"""
+            SELECT
+                strftime('%Y-%m', time) AS period,
+                CAST(substr(time, 1, 4) AS INTEGER) AS year,
+                CAST(strftime('%m', time) AS INTEGER) AS month,
+                AVG({col_name}) AS avg_value
+            FROM argo_data
+            WHERE {where_sql} AND {col_name} IS NOT NULL
+            GROUP BY strftime('%Y-%m', time)
+            ORDER BY period ASC
+        """
+    elif granularity == "quarter":
+        timeseries_query = f"""
+            SELECT
+                CAST(substr(time, 1, 4) AS INTEGER) AS year,
+                CAST(((CAST(strftime('%m', time) AS INTEGER) - 1) / 3) + 1 AS INTEGER) AS quarter,
+                AVG({col_name}) AS avg_value
+            FROM argo_data
+            WHERE {where_sql} AND {col_name} IS NOT NULL
+            GROUP BY CAST(substr(time, 1, 4) AS INTEGER), quarter
+            ORDER BY year ASC, quarter ASC
+        """
+    else:
+        timeseries_query = f"""
+            SELECT
+                CAST(substr(time, 1, 4) AS INTEGER) AS year,
+                AVG({col_name}) AS avg_value
+            FROM argo_data
+            WHERE {where_sql} AND {col_name} IS NOT NULL
+            GROUP BY CAST(substr(time, 1, 4) AS INTEGER)
+            ORDER BY year ASC
+        """
+
+    cur.execute(timeseries_query, params)
+    series_rows = cur.fetchall()
+
+    timeseries = []
+    if granularity == "month":
+        for row in series_rows:
+            label = row["period"]
+            timeseries.append({
+                "label": label,
+                "year": int(row["year"]),
+                "month": int(row["month"]),
+                "value": round(float(row["avg_value"]), 2),
+            })
+    elif granularity == "quarter":
+        for row in series_rows:
+            year_val = int(row["year"])
+            quarter_val = int(row["quarter"])
+            timeseries.append({
+                "label": f"{year_val}-Q{quarter_val}",
+                "year": year_val,
+                "quarter": quarter_val,
+                "value": round(float(row["avg_value"]), 2),
+            })
+    else:
+        for row in series_rows:
+            year_val = int(row["year"])
+            timeseries.append({
+                "label": str(year_val),
+                "year": year_val,
+                "value": round(float(row["avg_value"]), 2),
+            })
+
     # Prediction (5 years ahead)
     prediction_df = pd.DataFrame({
         "year": years_arr.astype(int),
@@ -284,6 +374,8 @@ def build_response(region: str, parameter: str, start_year, end_year,
 
     # AI Insight
     insight = generate_insight(region, col_name, stats, trend)
+
+    answer = generate_answer(region, col_name, stats, trend, risk, question)
     
     conn.close()
 
@@ -301,12 +393,15 @@ def build_response(region: str, parameter: str, start_year, end_year,
         "end_year":   int(years_arr.max()),
         "raw_limit":  RAW_PREVIEW_LIMIT,
         "data":       records,
+        "timeseries": timeseries,
+        "granularity": granularity,
         "yearly_data": yearly_data,
         "stats":      stats,
         "trend":      trend,
         "prediction": prediction_points,   # [{year, value}, ...]
         "insight":    insight,             # {text, source}
         "risk":       risk,
+        "answer":     answer,
     }
     
     return clean_nans(response)
@@ -371,13 +466,39 @@ def query_nl(data: dict):
     if not question:
         return {"error": "Please provide a question."}
 
+    lower_q = question.lower()
+    chart_keywords = (
+        "graph", "chart", "plot", "visual", "visualize", "visualise", "trend", "time series", "timeseries",
+        "show me", "display", "curve", "line chart", "area chart"
+    )
+    render_chart = any(keyword in lower_q for keyword in chart_keywords)
+
     # LLM (or rule-based) parsing
     parsed = parse_query(question)
 
     if not parsed.get("region"):
+        greetings = ("hello", "hi", "hey", "good morning", "good afternoon", "good evening")
+        if any(greet in lower_q for greet in greetings) or len(lower_q.split()) <= 2:
+            return {
+                "chat_only": True,
+                "answer": {
+                    "text": (
+                        "Hi! I can answer ocean data questions and summarize trends from the dataset. "
+                        "Try asking about a region (Indian, Pacific, Atlantic, Arctic) and a year range."
+                    ),
+                    "source": "assistant",
+                },
+            }
+
         return {
-            "error": "Region not recognised",
-            "message": "Try mentioning Indian Ocean, Pacific Ocean, Atlantic Ocean, or Arctic Ocean.",
+            "chat_only": True,
+            "answer": {
+                "text": (
+                    "I can help once you mention a region (Indian, Pacific, Atlantic, Arctic) and, if possible, "
+                    "a year or range (2020–2026)."
+                ),
+                "source": "assistant",
+            },
             "question": question,
             "parsed": parsed,
         }
@@ -389,7 +510,7 @@ def query_nl(data: dict):
         end_year=parsed.get("end_year"),
         question=question,
         parsed_source=parsed.get("source", "rule-based"),
-    )
+    ) | {"render_chart": render_chart}
 
 
 @app.get("/query")

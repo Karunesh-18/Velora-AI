@@ -14,10 +14,11 @@ import {
 } from "recharts";
 import "./App.css";
 
+const isNative = Boolean(window?.Capacitor?.isNativePlatform?.());
 const API_URL =
   import.meta.env.VITE_API_URL ||
-  (window.location.hostname === "localhost"
-    ? "http://127.0.0.1:8000"
+  (isNative
+    ? "http://10.0.2.2:8000"
     : `http://${window.location.hostname}:8000`);
 
 const DATASET_YEAR_START = 2020;
@@ -63,6 +64,8 @@ export default function App() {
   const [messages, setMessages]     = useState([]);
   const [result, setResult]         = useState(null);
   const [loading, setLoading]       = useState(false);
+  const [showDebug, setShowDebug]   = useState(false);
+  const [debugInfo, setDebugInfo]   = useState("");
   const chatEndRef                  = useRef(null);
   const queryCache                  = useRef({}); // Cache for query results
 
@@ -77,6 +80,21 @@ export default function App() {
   useEffect(() => {
     axios.get(`${API_URL}/`).then(() => setConnected(true)).catch(() => setConnected(false));
   }, []);
+
+  // Test connectivity
+  const testConnection = async () => {
+    setDebugInfo("Testing connection...");
+    try {
+      const start = Date.now();
+      const res = await axios.get(`${API_URL}/health`, { timeout: 5000 });
+      const elapsed = Date.now() - start;
+      setDebugInfo(`✓ Connected in ${elapsed}ms\nRecords: ${res.data.records}\nStatus: ${res.data.status}`);
+      setConnected(true);
+    } catch (err) {
+      setDebugInfo(`✗ Connection failed\nError: ${err.message}\nURL: ${API_URL}`);
+      setConnected(false);
+    }
+  };
 
   // Auto-scroll messages
   useEffect(() => {
@@ -95,17 +113,23 @@ export default function App() {
     try {
       // Check cache first
       if (queryCache.current[question]) {
-        setResult(queryCache.current[question]);
         const data = queryCache.current[question];
-        const trendDir = data.trend?.direction;
-        const trendIcon = trendDir === "rising" ? "↑" : trendDir === "falling" ? "↓" : "→";
-        const unit = data.parameter === "temperature" ? "°C" : " PSU";
-        const insightSrc = data.insight?.source === "llm" ? "🤖 LLaMA-3" : "📋 Template";
-        const aiText =
-          `Analysed **${data.region}** (${data.start_year}–${data.end_year}) — ` +
-          `${data.parameter} · Mean: **${data.stats.mean}${unit}** · ` +
-          `Trend: **${trendIcon} ${Math.abs(data.trend?.per_year)}${unit}/yr ${data.trend?.direction}** · ` +
-          `Insight via ${insightSrc} (cached)`;
+        if (data.chat_only && data.answer?.text) {
+          setMessages((prev) => [...prev, { role: "ai", text: data.answer.text }]);
+          setLoading(false);
+          return;
+        }
+        if (data.render_chart === false) {
+          setMessages((prev) => [...prev, { role: "ai", text: data.answer?.text || "" }]);
+          setLoading(false);
+          return;
+        }
+        setResult(data);
+        const aiText = data.answer?.text
+          ? data.answer.text
+          : `Analysed **${data.region}** (${data.start_year}–${data.end_year}) — ` +
+            `${data.parameter} · Mean: **${data.stats.mean}** · ` +
+            `Trend: **${data.trend?.direction || "stable"}** · Insight cached`;
         setMessages((prev) => [...prev, { role: "ai", text: aiText }]);
         setLoading(false);
         return;
@@ -120,18 +144,24 @@ export default function App() {
           { role: "ai", text: data.message || data.error, isError: true },
         ]);
       } else {
+        if (data.chat_only && data.answer?.text) {
+          queryCache.current[question] = data;
+          setMessages((prev) => [...prev, { role: "ai", text: data.answer.text }]);
+          return;
+        }
+        if (data.render_chart === false) {
+          queryCache.current[question] = data;
+          setMessages((prev) => [...prev, { role: "ai", text: data.answer?.text || "" }]);
+          return;
+        }
         // Cache the result
         queryCache.current[question] = data;
         setResult(data);
-        const trendDir = data.trend?.direction;
-        const trendIcon = trendDir === "rising" ? "↑" : trendDir === "falling" ? "↓" : "→";
-        const unit = data.parameter === "temperature" ? "°C" : " PSU";
-        const insightSrc = data.insight?.source === "llm" ? "🤖 LLaMA-3" : "📋 Template";
-        const aiText =
-          `Analysed **${data.region}** (${data.start_year}–${data.end_year}) — ` +
-          `${data.parameter} · Mean: **${data.stats.mean}${unit}** · ` +
-          `Trend: **${trendIcon} ${Math.abs(data.trend?.per_year)}${unit}/yr ${data.trend?.direction}** · ` +
-          `Insight via ${insightSrc}`;
+        const aiText = data.answer?.text
+          ? data.answer.text
+          : `Analysed **${data.region}** (${data.start_year}–${data.end_year}) — ` +
+            `${data.parameter} · Mean: **${data.stats.mean}** · ` +
+            `Trend: **${data.trend?.direction || "stable"}** · Insight ready`;
         setMessages((prev) => [...prev, { role: "ai", text: aiText }]);
       }
     } catch {
@@ -146,20 +176,28 @@ export default function App() {
 
   // Merge historical + prediction into one chart array
   const chartData = useMemo(() => {
+    if (result?.timeseries?.length) {
+      return result.timeseries.map((point) => ({
+        label: point.label,
+        [result.parameter]: point.value,
+        predicted: null,
+      }));
+    }
+
     if (!result?.yearly_data?.length) return [];
 
     const hist = result.yearly_data.map((point) => ({
-      year: point.year,
+      label: String(point.year),
       [result.parameter]: point.value,
       predicted: null,
     }));
 
     const predPoints = (result.prediction || []).map((p) => ({
-      year: p.year,
+      label: String(p.year),
       [result.parameter]: null,
       predicted: parseFloat(p.value.toFixed(2)),
     }));
-    
+
     return [...hist, ...predPoints];
   }, [result]);
 
@@ -188,8 +226,72 @@ export default function App() {
         <div className="header-status">
           <div className={`status-dot ${connected ? "connected" : ""}`} />
           {connected ? "Backend Connected" : "Backend Offline"}
+          <button
+            className="debug-toggle"
+            onClick={() => setShowDebug(!showDebug)}
+            style={{ marginLeft: "8px", padding: "4px 8px", fontSize: "0.75rem", cursor: "pointer" }}
+          >
+            {showDebug ? "Hide Debug" : "🔧 Debug"}
+          </button>
         </div>
       </header>
+
+      {/* ── DEBUG PANEL ── */}
+      {showDebug && (
+        <div className="debug-panel" style={{
+          background: "#1a1a2e",
+          border: "1px solid #16213e",
+          borderRadius: "8px",
+          padding: "16px",
+          margin: "16px",
+          fontFamily: "monospace",
+          fontSize: "0.85rem",
+          color: "#00ff88"
+        }}>
+          <div style={{ marginBottom: "12px", fontWeight: "bold", color: "#00d4ff" }}>
+            🔍 Connection Debug
+          </div>
+          <div style={{ marginBottom: "8px" }}>
+            <strong>Native Mode:</strong> {isNative ? "Yes (Capacitor)" : "No (Browser)"}
+          </div>
+          <div style={{ marginBottom: "8px" }}>
+            <strong>API URL:</strong> {API_URL}
+          </div>
+          <div style={{ marginBottom: "8px" }}>
+            <strong>VITE_API_URL:</strong> {import.meta.env.VITE_API_URL || "(not set)"}
+          </div>
+          <div style={{ marginBottom: "8px" }}>
+            <strong>Window Hostname:</strong> {window.location.hostname}
+          </div>
+          <button
+            onClick={testConnection}
+            style={{
+              background: "#00d4ff",
+              color: "#0f0f23",
+              border: "none",
+              padding: "8px 16px",
+              borderRadius: "6px",
+              cursor: "pointer",
+              fontWeight: "bold",
+              marginTop: "8px"
+            }}
+          >
+            Test Connection
+          </button>
+          {debugInfo && (
+            <pre style={{
+              marginTop: "12px",
+              background: "#0f0f23",
+              padding: "12px",
+              borderRadius: "6px",
+              whiteSpace: "pre-wrap",
+              color: debugInfo.startsWith("✓") ? "#00ff88" : "#ff4757"
+            }}>
+              {debugInfo}
+            </pre>
+          )}
+        </div>
+      )}
 
       {/* ── MAIN ── */}
       <main className="main">
@@ -395,7 +497,7 @@ export default function App() {
                     </defs>
                     <CartesianGrid stroke="rgba(0,194,168,0.07)" strokeDasharray="4 4" />
                     <XAxis
-                      dataKey="year"
+                      dataKey="label"
                       stroke="#4a6fa8"
                       tick={{ fill: "#8ab4c8", fontSize: 12 }}
                       axisLine={false}
