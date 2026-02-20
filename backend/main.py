@@ -1,74 +1,43 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query as QParam
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 import pandas as pd
 import numpy as np
 from typing import Optional
 import os
-import re
+from dotenv import load_dotenv
 
-app = FastAPI(title="Velora AI Backend", version="1.1.0")
+# Load env before importing AI modules
+load_dotenv()
+
+from ai.query_parser import parse_query
+from ai.insight_generator import generate_insight
+from ai.predictor import OceanPredictor
+
+app = FastAPI(title="Velora AI Backend", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173",
+                   "http://localhost:5174", "http://127.0.0.1:5174"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ── Load dataset once ──────────────────────────────────────────────────────────
+# ── Load dataset ───────────────────────────────────────────────────────────────
 DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "argo_sample.csv")
 df = pd.read_csv(DATA_PATH)
 df["date"] = pd.to_datetime(df["date"])
 df["year"] = df["date"].dt.year
 
-# ── Region aliases ─────────────────────────────────────────────────────────────
-REGION_ALIASES = {
-    "Indian Ocean":   ["indian", "india", "arabian", "bay of bengal"],
-    "Pacific Ocean":  ["pacific", "pacific ocean"],
-    "Atlantic Ocean": ["atlantic", "atlantic ocean"],
-    "Arctic Ocean":   ["arctic", "north pole", "polar", "arct"],
-}
-
-def parse_natural_language(question: str) -> dict:
-    """
-    Rule-based NLP parser.
-    Extracts: region, parameter, start_year, end_year from free-form text.
-    """
-    q = question.lower().strip()
-
-    # ── Region detection ───────────────────────────────────────────────────────
-    detected_region = None
-    for region, aliases in REGION_ALIASES.items():
-        if any(alias in q for alias in aliases):
-            detected_region = region
-            break
-
-    # ── Parameter detection ────────────────────────────────────────────────────
-    if "salin" in q:
-        parameter = "salinity"
-    else:
-        parameter = "temperature"  # default
-
-    # ── Year extraction ────────────────────────────────────────────────────────
-    # Matches: "2015", "2015-2020", "2015 to 2020", "from 2015"
-    years = re.findall(r"\b(20\d{2})\b", q)
-    years = [int(y) for y in years]
-
-    start_year = min(years) if len(years) >= 2 else (years[0] if years else None)
-    end_year   = max(years) if len(years) >= 2 else None
-
-    return {
-        "region": detected_region,
-        "parameter": parameter,
-        "start_year": start_year,
-        "end_year": end_year,
-    }
+predictor = OceanPredictor()
 
 
-def build_response(region: str, parameter: str, start_year, end_year, original_question: str = ""):
-    """Shared logic: filter df, compute stats & trend, build JSON."""
+# ── Shared filter + response builder ──────────────────────────────────────────
+def build_response(region: str, parameter: str, start_year, end_year,
+                   question: str = "", parsed_source: str = "rule-based"):
+
+    col = parameter if parameter in ["temperature", "salinity"] else "temperature"
     filtered = df[df["region"] == region].copy()
 
     if start_year:
@@ -78,64 +47,75 @@ def build_response(region: str, parameter: str, start_year, end_year, original_q
 
     if filtered.empty:
         return {
-            "region": region,
-            "parameter": parameter,
-            "question": original_question,
-            "parsed": {"region": region, "parameter": parameter,
-                       "start_year": start_year, "end_year": end_year},
-            "data": [],
-            "stats": {},
-            "trend": None,
+            "region": region, "parameter": col, "question": question,
+            "parsed": {"region": region, "parameter": col,
+                       "start_year": start_year, "end_year": end_year,
+                       "source": parsed_source},
+            "data": [], "stats": {}, "trend": None, "prediction": [],
+            "insight": None,
             "message": f"No data found for region: {region}",
         }
 
-    col = parameter if parameter in ["temperature", "salinity"] else "temperature"
-
-    records = []
-    for _, row in filtered.iterrows():
-        records.append({
+    # Records
+    records = [
+        {
             "date": row["date"].strftime("%Y-%m-%d"),
             "year": int(row["year"]),
             "latitude": float(row["latitude"]),
             "longitude": float(row["longitude"]),
             "temperature": float(row["temperature"]),
             "salinity": float(row["salinity"]),
-        })
+        }
+        for _, row in filtered.iterrows()
+    ]
 
-    values = filtered[col].tolist()
+    # Stats
+    values = filtered[col].values
     stats = {
-        "min":   round(float(np.min(values)), 2),
-        "max":   round(float(np.max(values)), 2),
+        "min":   round(float(np.min(values)),  2),
+        "max":   round(float(np.max(values)),  2),
         "mean":  round(float(np.mean(values)), 2),
-        "std":   round(float(np.std(values)), 2),
+        "std":   round(float(np.std(values)),  2),
         "count": len(values),
     }
 
+    # Trend
     years_arr = filtered["year"].values
     if len(years_arr) > 1:
-        coeffs = np.polyfit(years_arr, filtered[col].values, 1)
+        coeffs = np.polyfit(years_arr, values, 1)
         trend_per_year = round(float(coeffs[0]), 4)
     else:
         trend_per_year = 0.0
 
+    trend = {
+        "per_year":  trend_per_year,
+        "direction": "rising" if trend_per_year > 0 else "falling" if trend_per_year < 0 else "stable",
+    }
+
+    # Prediction (5 years ahead)
+    pred_result = predictor.predict_trend(filtered, col, future_years=5)
+    prediction_points = pred_result.get("predictions", []) if pred_result.get("success") else []
+
+    # AI Insight
+    insight = generate_insight(region, col, stats, trend)
+
     return {
-        "region": region,
+        "region":    region,
         "parameter": col,
-        "question": original_question,
+        "question":  question,
         "parsed": {
-            "region": region,
-            "parameter": col,
+            "region": region, "parameter": col,
             "start_year": start_year or int(filtered["year"].min()),
-            "end_year": end_year or int(filtered["year"].max()),
+            "end_year":   end_year   or int(filtered["year"].max()),
+            "source": parsed_source,
         },
         "start_year": int(filtered["year"].min()),
         "end_year":   int(filtered["year"].max()),
-        "data":  records,
-        "stats": stats,
-        "trend": {
-            "per_year":  trend_per_year,
-            "direction": "rising" if trend_per_year > 0 else "falling" if trend_per_year < 0 else "stable",
-        },
+        "data":       records,
+        "stats":      stats,
+        "trend":      trend,
+        "prediction": prediction_points,   # [{year, value}, ...]
+        "insight":    insight,             # {text, source}
     }
 
 
@@ -143,54 +123,61 @@ def build_response(region: str, parameter: str, start_year, end_year, original_q
 
 @app.get("/")
 def home():
-    return {"message": "Velora AI backend running", "status": "healthy", "version": "1.1.0"}
+    groq_enabled = bool(os.getenv("GROQ_API_KEY"))
+    return {
+        "message": "Velora AI backend running",
+        "version": "2.0.0",
+        "llm": "groq/llama3-70b-8192" if groq_enabled else "rule-based",
+    }
 
 
 @app.get("/health")
-def health_check():
+def health():
     return {"status": "healthy", "records": len(df)}
 
 
 @app.get("/regions")
-def get_regions():
+def regions():
     return {"regions": sorted(df["region"].unique().tolist())}
 
 
 @app.post("/query")
-def query_natural_language(data: dict):
+def query_nl(data: dict):
     """
-    POST /query — natural language ocean query.
-    Body: { "question": "Show temperature trend in Indian Ocean from 2015 to 2020" }
+    POST /query
+    Body: { "question": "Show salinity in Atlantic Ocean from 2018 to 2021" }
     """
     question = data.get("question", "").strip()
     if not question:
         return {"error": "Please provide a question."}
 
-    parsed = parse_natural_language(question)
+    # LLM (or rule-based) parsing
+    parsed = parse_query(question)
 
-    if not parsed["region"]:
+    if not parsed.get("region"):
         return {
-            "error": "Region not recognized",
-            "message": "Try mentioning 'Indian Ocean', 'Pacific Ocean', 'Atlantic Ocean', or 'Arctic Ocean'.",
+            "error": "Region not recognised",
+            "message": "Try mentioning Indian Ocean, Pacific Ocean, Atlantic Ocean, or Arctic Ocean.",
             "question": question,
             "parsed": parsed,
         }
 
     return build_response(
         region=parsed["region"],
-        parameter=parsed["parameter"],
-        start_year=parsed["start_year"],
-        end_year=parsed["end_year"],
-        original_question=question,
+        parameter=parsed.get("parameter", "temperature"),
+        start_year=parsed.get("start_year"),
+        end_year=parsed.get("end_year"),
+        question=question,
+        parsed_source=parsed.get("source", "rule-based"),
     )
 
 
 @app.get("/query")
 def query_get(
-    region: str = Query(...),
-    start_year: Optional[int] = Query(None),
-    end_year: Optional[int] = Query(None),
-    parameter: Optional[str] = Query("temperature"),
+    region: str = QParam(...),
+    start_year: Optional[int] = QParam(None),
+    end_year:   Optional[int] = QParam(None),
+    parameter:  Optional[str] = QParam("temperature"),
 ):
-    """GET /query — kept for direct URL testing."""
+    """GET /query — for direct URL testing."""
     return build_response(region, parameter, start_year, end_year)

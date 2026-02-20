@@ -1,129 +1,92 @@
 """
-Query Parser module
-Converts natural language queries into structured JSON using LLM
+Query Parser — Groq LLM (llama3-70b-8192) with rule-based fallback
 """
 
-import openai
 import os
+import re
 import json
 from typing import Dict, Optional
+from openai import OpenAI
+from dotenv import load_dotenv
 
-class QueryParser:
-    def __init__(self, api_key: Optional[str] = None):
-        """
-        Initialize the query parser with OpenAI API
-        """
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        if self.api_key:
-            openai.api_key = self.api_key
-    
-    def parse(self, user_query: str) -> Dict:
-        """
-        Parse natural language query into structured format
-        
-        Args:
-            user_query: Natural language query from user
-            
-        Returns:
-            Dictionary with region, parameter, start_year, end_year
-        """
-        
-        # For demo/hackathon: Simple keyword extraction
-        # In production: Use OpenAI GPT to parse
-        
-        query_lower = user_query.lower()
-        
-        # Extract parameters
-        params = {
-            "region": self._extract_region(query_lower),
-            "parameter": self._extract_parameter(query_lower),
-            "start_year": self._extract_year(query_lower, "start"),
-            "end_year": self._extract_year(query_lower, "end")
-        }
-        
-        return params
-    
-    def _extract_region(self, query: str) -> Optional[str]:
-        """Extract region from query"""
-        regions = {
-            "indian ocean": "Indian Ocean",
-            "pacific": "Pacific Ocean",
-            "atlantic": "Atlantic Ocean",
-            "arctic": "Arctic Ocean",
-            "southern": "Southern Ocean"
-        }
-        
-        for key, value in regions.items():
-            if key in query:
-                return value
-        
+load_dotenv()
+
+
+def _make_client() -> Optional[OpenAI]:
+    key = os.getenv("GROQ_API_KEY")
+    base = os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1")
+    if not key:
         return None
-    
-    def _extract_parameter(self, query: str) -> Optional[str]:
-        """Extract parameter from query"""
-        parameters = {
-            "temperature": "temperature",
-            "temp": "temperature",
-            "salinity": "salinity",
-            "salt": "salinity",
-            "oxygen": "oxygen",
-            "pressure": "pressure"
-        }
-        
-        for key, value in parameters.items():
-            if key in query:
-                return value
-        
-        return None
-    
-    def _extract_year(self, query: str, year_type: str) -> Optional[int]:
-        """Extract years from query"""
-        import re
-        
-        # Find all 4-digit numbers that look like years
-        years = re.findall(r'\b(19\d{2}|20\d{2})\b', query)
-        
-        if not years:
-            return None
-        
-        years = [int(y) for y in years]
-        
-        if year_type == "start":
-            return min(years)
-        elif year_type == "end":
-            return max(years)
-        
-        return None
-    
-    def parse_with_gpt(self, user_query: str) -> Dict:
-        """
-        Parse query using OpenAI GPT (for production)
-        """
-        if not self.api_key:
-            return self.parse(user_query)
-        
-        try:
-            system_prompt = """You are an ocean data query parser. 
-            Convert natural language queries into structured JSON with these fields:
-            - region (e.g., "Indian Ocean", "Pacific Ocean")
-            - parameter (e.g., "temperature", "salinity", "oxygen")
-            - start_year (integer)
-            - end_year (integer)
-            
-            Return only valid JSON."""
-            
-            response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_query}
-                ],
-                temperature=0
-            )
-            
-            result = json.loads(response.choices[0].message.content)
-            return result
-            
-        except Exception as e:
-            print(f"GPT parsing failed: {e}")
-            return self.parse(user_query)
+    return OpenAI(api_key=key, base_url=base)
+
+
+_client = _make_client()
+_MODEL  = os.getenv("LLM_MODEL", "llama3-70b-8192")
+
+REGION_ALIASES = {
+    "Indian Ocean":   ["indian", "india", "arabian", "bay of bengal"],
+    "Pacific Ocean":  ["pacific"],
+    "Atlantic Ocean": ["atlantic"],
+    "Arctic Ocean":   ["arctic", "polar", "north pole"],
+}
+
+
+# ── Fallback rule-based parser ─────────────────────────────────────────────────
+def _rule_based(question: str) -> Dict:
+    q = question.lower()
+    region = None
+    for r, aliases in REGION_ALIASES.items():
+        if any(a in q for a in aliases):
+            region = r
+            break
+
+    parameter = "salinity" if "salin" in q else "temperature"
+
+    years = [int(y) for y in re.findall(r"\b(20\d{2})\b", q)]
+    start_year = min(years) if len(years) >= 2 else (years[0] if years else None)
+    end_year   = max(years) if len(years) >= 2 else None
+
+    return {"region": region, "parameter": parameter,
+            "start_year": start_year, "end_year": end_year,
+            "source": "rule-based"}
+
+
+# ── LLM parser ─────────────────────────────────────────────────────────────────
+def parse_query(question: str) -> Dict:
+    """
+    Parse a natural language ocean query.
+    Uses Groq LLaMA-3 if available, falls back to rule-based.
+    """
+    if not _client:
+        return _rule_based(question)
+
+    system = (
+        "You are an ocean data query parser. "
+        "Extract structured information from the user query and return ONLY valid JSON "
+        "with these exact keys: "
+        "\"region\" (one of: Indian Ocean, Pacific Ocean, Atlantic Ocean, Arctic Ocean, or null), "
+        "\"parameter\" (\"temperature\" or \"salinity\"), "
+        "\"start_year\" (integer or null), "
+        "\"end_year\" (integer or null). "
+        "Return nothing except the JSON object."
+    )
+
+    try:
+        resp = _client.chat.completions.create(
+            model=_MODEL,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user",   "content": question},
+            ],
+            temperature=0,
+            max_tokens=150,
+        )
+        raw = resp.choices[0].message.content.strip()
+        # Strip markdown fences if model adds them
+        raw = re.sub(r"^```[a-z]*\n?", "", raw).rstrip("`").strip()
+        parsed = json.loads(raw)
+        parsed["source"] = "llm"
+        return parsed
+    except Exception as e:
+        print(f"[QueryParser] LLM failed ({e}), using rule-based fallback")
+        return _rule_based(question)

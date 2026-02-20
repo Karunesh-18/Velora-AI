@@ -1,9 +1,9 @@
 """
-AI Module Initialization
+AI Module — updated for function-based query_parser and insight_generator
 """
 
-from .query_parser import QueryParser
+from .query_parser import parse_query
+from .insight_generator import generate_insight
 from .predictor import OceanPredictor
-from .insight_generator import InsightGenerator
 
-__all__ = ['QueryParser', 'OceanPredictor', 'InsightGenerator']
+__all__ = ['parse_query', 'generate_insight', 'OceanPredictor']

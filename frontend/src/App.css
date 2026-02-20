@@ -732,9 +732,60 @@
 
 .footer span { color: var(--teal); }
 
+/* Loading card */
+.loading-card { padding: 20px; }
+
+/* ===== AI INSIGHT CARD ===== */
+.insight-card {
+  padding: 20px 22px;
+  border-left: 3px solid var(--teal) !important;
+}
+
+.insight-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.insight-title {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.ai-badge {
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 3px 11px;
+  border-radius: 999px;
+  letter-spacing: 0.3px;
+}
+
+.ai-badge.llm {
+  background: rgba(167, 139, 250, 0.15);
+  border: 1px solid rgba(167, 139, 250, 0.35);
+  color: #c4b5fd;
+}
+
+.ai-badge.template {
+  background: var(--teal-dim);
+  border: 1px solid var(--border);
+  color: var(--teal);
+}
+
+.insight-text {
+  font-size: 0.88rem;
+  color: var(--text-secondary);
+  line-height: 1.7;
+  margin: 0;
+}
+
 /* ===== RESPONSIVE ===== */
 @media (max-width: 900px) {
   .main { flex-direction: column; padding: 20px; }
-  .control-panel { width: 100%; }
+  .chat-panel { width: 100%; }
   .header { padding: 0 20px; }
+  .stats-row { flex-wrap: wrap; }
+  .stat-card { min-width: 80px; }
 }

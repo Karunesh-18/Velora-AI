@@ -1,18 +1,20 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import axios from "axios";
 import {
-  AreaChart,
+  ComposedChart,
   Area,
+  Line,
   XAxis,
   YAxis,
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
   ReferenceLine,
+  Legend,
 } from "recharts";
 import "./App.css";
 
-const API_URL = "http://127.0.0.1:8000";
+const API_URL = "http://127.0.0.1:8001";
 
 const EXAMPLE_QUERIES = [
   "Show temperature trend in Indian Ocean from 2015 to 2020",
@@ -83,11 +85,12 @@ export default function App() {
         const trendDir = data.trend?.direction;
         const trendIcon = trendDir === "rising" ? "↑" : trendDir === "falling" ? "↓" : "→";
         const unit = data.parameter === "temperature" ? "°C" : " PSU";
+        const insightSrc = data.insight?.source === "llm" ? "🤖 LLaMA-3" : "📋 Template";
         const aiText =
           `Analysed **${data.region}** (${data.start_year}–${data.end_year}) — ` +
           `${data.parameter} · Mean: **${data.stats.mean}${unit}** · ` +
-          `Range: ${data.stats.min}–${data.stats.max}${unit} · ` +
-          `Trend: **${trendIcon} ${Math.abs(data.trend?.per_year)}${unit}/yr ${data.trend?.direction}**`;
+          `Trend: **${trendIcon} ${Math.abs(data.trend?.per_year)}${unit}/yr ${data.trend?.direction}** · ` +
+          `Insight via ${insightSrc}`;
         setMessages((prev) => [...prev, { role: "ai", text: aiText }]);
       }
     } catch {
@@ -99,6 +102,22 @@ export default function App() {
       setLoading(false);
     }
   };
+
+  // Merge historical + prediction into one chart array
+  const chartData = useMemo(() => {
+    if (!result?.data?.length) return [];
+    const hist = result.data.map((r) => ({
+      year: r.year,
+      [result.parameter]: r[result.parameter],
+      predicted: null,
+    }));
+    const predPoints = (result.prediction || []).map((p) => ({
+      year: p.year,
+      [result.parameter]: null,
+      predicted: parseFloat(p.value.toFixed(2)),
+    }));
+    return [...hist, ...predPoints];
+  }, [result]);
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -273,6 +292,7 @@ export default function App() {
             </div>
           )}
 
+
           {/* ── Area Chart ── */}
           {result?.data?.length > 0 && (
             <div className="glass chart-card" style={{ animation: "fadeInUp 0.4s ease" }}>
@@ -284,6 +304,11 @@ export default function App() {
                   </div>
                   <div className="chart-subtitle">
                     {result.start_year}–{result.end_year} · {result.stats.count} data points
+                    {result.prediction?.length > 0 && (
+                      <span style={{ color: "#a78bfa", marginLeft: 8 }}>
+                        + {result.prediction.length}yr forecast
+                      </span>
+                    )}
                   </div>
                 </div>
                 <div className="chart-badge">ARGO Floats</div>
@@ -291,7 +316,7 @@ export default function App() {
 
               <div className="chart-wrapper">
                 <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={result.data} margin={{ top: 6, right: 6, left: -12, bottom: 0 }}>
+                  <ComposedChart data={chartData} margin={{ top: 6, right: 6, left: -12, bottom: 0 }}>
                     <defs>
                       <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="5%"  stopColor="#00C2A8" stopOpacity={0.4} />
@@ -327,10 +352,38 @@ export default function App() {
                       fill="url(#areaGrad)"
                       dot={{ fill: "#00C2A8", r: 4, strokeWidth: 0 }}
                       activeDot={{ r: 6, fill: "#4FD1C5", stroke: "#fff", strokeWidth: 2 }}
+                      connectNulls={false}
+                      name="Historical"
                     />
-                  </AreaChart>
+                    {result.prediction?.length > 0 && (
+                      <Line
+                        type="monotone"
+                        dataKey="predicted"
+                        stroke="#a78bfa"
+                        strokeWidth={2}
+                        strokeDasharray="6 4"
+                        dot={{ fill: "#a78bfa", r: 3, strokeWidth: 0 }}
+                        activeDot={{ r: 5, fill: "#c4b5fd", stroke: "#fff", strokeWidth: 2 }}
+                        connectNulls={false}
+                        name="Forecast"
+                      />
+                    )}
+                  </ComposedChart>
                 </ResponsiveContainer>
               </div>
+            </div>
+          )}
+
+          {/* ── AI Insight Card ── */}
+          {result?.insight && (
+            <div className="glass insight-card" style={{ animation: "fadeInUp 0.45s ease" }}>
+              <div className="insight-header">
+                <div className="insight-title">🧠 AI Insight</div>
+                <span className={`ai-badge ${result.insight.source}`}>
+                  {result.insight.source === "llm" ? "⚡ LLaMA-3 70B" : "📋 Template"}
+                </span>
+              </div>
+              <p className="insight-text">{result.insight.text}</p>
             </div>
           )}
 
