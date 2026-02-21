@@ -24,6 +24,7 @@ default_cors = [
     "http://localhost:8100",
     "http://192.168.137.29:5173", "http://192.168.137.29:5174",
     "http://10.82.81.103:5173", "http://10.82.81.103:5174",
+    "http://192.168.154.236:5173", "http://192.168.154.236:5174",
 ]
 
 cors_env = os.getenv("CORS_ORIGINS", "")
@@ -371,6 +372,13 @@ def build_response(region: str, parameter: str, start_year, end_year,
     })
     pred_result = predictor.predict_trend(prediction_df, col_name, future_years=5)
     prediction_points = pred_result.get("predictions", []) if pred_result.get("success") else []
+    
+    # Extract prediction accuracy metrics
+    prediction_accuracy = {
+        "r_squared": round(pred_result.get("r_squared", 0.0), 3) if pred_result.get("success") else None,
+        "confidence": pred_result.get("confidence", "unknown"),
+        "slope": round(pred_result.get("slope", 0.0), 4) if pred_result.get("success") else None,
+    }
 
     # AI Insight
     insight = generate_insight(region, col_name, stats, trend)
@@ -399,6 +407,7 @@ def build_response(region: str, parameter: str, start_year, end_year,
         "stats":      stats,
         "trend":      trend,
         "prediction": prediction_points,   # [{year, value}, ...]
+        "prediction_accuracy": prediction_accuracy,  # {r_squared, confidence, slope}
         "insight":    insight,             # {text, source}
         "risk":       risk,
         "answer":     answer,

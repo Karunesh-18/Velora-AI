@@ -64,8 +64,6 @@ export default function App() {
   const [messages, setMessages]     = useState([]);
   const [result, setResult]         = useState(null);
   const [loading, setLoading]       = useState(false);
-  const [showDebug, setShowDebug]   = useState(false);
-  const [debugInfo, setDebugInfo]   = useState("");
   const chatEndRef                  = useRef(null);
   const queryCache                  = useRef({}); // Cache for query results
 
@@ -80,21 +78,6 @@ export default function App() {
   useEffect(() => {
     axios.get(`${API_URL}/`).then(() => setConnected(true)).catch(() => setConnected(false));
   }, []);
-
-  // Test connectivity
-  const testConnection = async () => {
-    setDebugInfo("Testing connection...");
-    try {
-      const start = Date.now();
-      const res = await axios.get(`${API_URL}/health`, { timeout: 5000 });
-      const elapsed = Date.now() - start;
-      setDebugInfo(`✓ Connected in ${elapsed}ms\nRecords: ${res.data.records}\nStatus: ${res.data.status}`);
-      setConnected(true);
-    } catch (err) {
-      setDebugInfo(`✗ Connection failed\nError: ${err.message}\nURL: ${API_URL}`);
-      setConnected(false);
-    }
-  };
 
   // Auto-scroll messages
   useEffect(() => {
@@ -226,72 +209,8 @@ export default function App() {
         <div className="header-status">
           <div className={`status-dot ${connected ? "connected" : ""}`} />
           {connected ? "Backend Connected" : "Backend Offline"}
-          <button
-            className="debug-toggle"
-            onClick={() => setShowDebug(!showDebug)}
-            style={{ marginLeft: "8px", padding: "4px 8px", fontSize: "0.75rem", cursor: "pointer" }}
-          >
-            {showDebug ? "Hide Debug" : "🔧 Debug"}
-          </button>
         </div>
       </header>
-
-      {/* ── DEBUG PANEL ── */}
-      {showDebug && (
-        <div className="debug-panel" style={{
-          background: "#1a1a2e",
-          border: "1px solid #16213e",
-          borderRadius: "8px",
-          padding: "16px",
-          margin: "16px",
-          fontFamily: "monospace",
-          fontSize: "0.85rem",
-          color: "#00ff88"
-        }}>
-          <div style={{ marginBottom: "12px", fontWeight: "bold", color: "#00d4ff" }}>
-            🔍 Connection Debug
-          </div>
-          <div style={{ marginBottom: "8px" }}>
-            <strong>Native Mode:</strong> {isNative ? "Yes (Capacitor)" : "No (Browser)"}
-          </div>
-          <div style={{ marginBottom: "8px" }}>
-            <strong>API URL:</strong> {API_URL}
-          </div>
-          <div style={{ marginBottom: "8px" }}>
-            <strong>VITE_API_URL:</strong> {import.meta.env.VITE_API_URL || "(not set)"}
-          </div>
-          <div style={{ marginBottom: "8px" }}>
-            <strong>Window Hostname:</strong> {window.location.hostname}
-          </div>
-          <button
-            onClick={testConnection}
-            style={{
-              background: "#00d4ff",
-              color: "#0f0f23",
-              border: "none",
-              padding: "8px 16px",
-              borderRadius: "6px",
-              cursor: "pointer",
-              fontWeight: "bold",
-              marginTop: "8px"
-            }}
-          >
-            Test Connection
-          </button>
-          {debugInfo && (
-            <pre style={{
-              marginTop: "12px",
-              background: "#0f0f23",
-              padding: "12px",
-              borderRadius: "6px",
-              whiteSpace: "pre-wrap",
-              color: debugInfo.startsWith("✓") ? "#00ff88" : "#ff4757"
-            }}>
-              {debugInfo}
-            </pre>
-          )}
-        </div>
-      )}
 
       {/* ── MAIN ── */}
       <main className="main">
@@ -477,9 +396,21 @@ export default function App() {
                   <div className="chart-subtitle">
                     {result.start_year}–{result.end_year} · {result.stats.count.toLocaleString()} measurements
                     {result.prediction?.length > 0 && (
-                      <span style={{ color: "#a78bfa", marginLeft: 8 }}>
-                        + {result.prediction.length}yr forecast
-                      </span>
+                      <>
+                        <span style={{ color: "#a78bfa", marginLeft: 8 }}>
+                          + {result.prediction.length}yr forecast
+                        </span>
+                        {result.prediction_accuracy?.r_squared != null && (
+                          <span style={{ 
+                            color: result.prediction_accuracy.confidence === "high" ? "#10b981" : 
+                                   result.prediction_accuracy.confidence === "medium" ? "#f59e0b" : "#ef4444",
+                            marginLeft: 8,
+                            fontSize: "0.85rem"
+                          }}>
+                            (R²={result.prediction_accuracy.r_squared.toFixed(2)} · {result.prediction_accuracy.confidence} confidence)
+                          </span>
+                        )}
+                      </>
                     )}
                   </div>
                 </div>
